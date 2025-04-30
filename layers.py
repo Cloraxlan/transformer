@@ -40,6 +40,9 @@ class Layer:
         Most tensors do nothing during a step so we simply do nothing in the default case.
         """
         pass
+    def update_size(self, size):
+        self.size = size
+        self.grad = torch.zeros(size)
 
 class Input(Layer):
     def __init__(self, size, train):
@@ -49,15 +52,19 @@ class Input(Layer):
         Layer.__init__(self, size, [], train) # TODO: Pass along any arguments to the parent's initializer here.
         self.output = torch.zeros(size)
 
-    def set(self,output):
+    def set(self,output,is_batch_input=False):
         """
         TODO: Accept any arguments specific to this method.
         TODO: Set the output of this input layer.
         :param output: The output to set, as a torch tensor. Raise an error if this output's size
                        would change.
         """
-        if output.size() != self.size:
-            raise("Size does not match")
+        if is_batch_input:
+            self.size = output.size()
+            self.grad = torch.zeros(self.size)
+        else:
+            if output.size() != self.size:
+                raise("Size does not match")
         self.output = output
 
     def randomize(self):
@@ -67,7 +74,8 @@ class Input(Layer):
         distribution (torch has a nice method to do this). Ensure that the output does not
         change size.
         """
-        self.output = torch.normal(0, 1, size=self.size)
+        #For some reason torch.normal ignores default device, seems to be a bug with pytorch
+        self.output = torch.normal(0, 1, size=self.size, device=torch.get_default_device()) * 0.1
 
     def forward(self):
         """
@@ -95,8 +103,12 @@ class Input(Layer):
         """
         if self.train:
             self.output -= learning_rate * self.grad
+    def update_size(self):
+        pass
+    
+
 class Linear(Layer):
-    def __init__(self, input_node, weight_node, bias_node):
+    def __init__(self, input_node, weight_node, bias_node, debug_name=None):
         """
         TODO: Accept any arguments specific to this child class.
         """
@@ -104,6 +116,7 @@ class Linear(Layer):
         self.input_node = input_node
         self.weight_node = weight_node
         self.bias_node = bias_node
+        self.debug_name = debug_name
 
     def forward(self):
         """
@@ -122,10 +135,11 @@ class Linear(Layer):
         this method.  This method should compute its own internal and input gradients
         and accumulate the input gradients into the previous layer.
         """
-        print(torch.t(self.weight_node.output))
         self.input_node.accumulate_grad(torch.t(self.weight_node.output) @ self.grad)
         self.weight_node.accumulate_grad(self.grad @ torch.t(self.input_node.output))
-        self.bias_node.accumulate_grad(self.grad)
+        self.bias_node.accumulate_grad(torch.sum(self.grad, dim = 1).reshape(-1, 1))
+    def update_size(self):
+        Layer.update_size(self, torch.Size([self.weight_node.size[0],self.input_node.size[1]]))
 
 class ReLU(Layer):
     def __init__(self, input_node):
@@ -151,6 +165,8 @@ class ReLU(Layer):
         """
         relu_derivative = torch.where(self.input_node.output >= 0, 1, 0)
         self.input_node.accumulate_grad(relu_derivative * self.grad)
+    def update_size(self):
+        pass
 
 
 class MSELoss(Layer):
@@ -183,9 +199,11 @@ class MSELoss(Layer):
         and accumulate the input gradients into the previous layer.
         """
         n = self.predicted_node.output.size()[1]
-        print(2 * self.grad * n)
         self.predicted_node.accumulate_grad((2 * self.grad / n) * (self.predicted_node.output - self.true_node.output))
         self.true_node.accumulate_grad((2 * self.grad / n) * (self.true_node.output - self.predicted_node.output))
+    def update_size(self):
+        pass
+    
 
 
 
@@ -212,6 +230,8 @@ class Regularization(Layer):
         and accumulate the input gradients into the previous layer.
         """
         self.weight_node.accumulate_grad(2 * self.grad * self.lambda_ * self.weight_node.output)
+    def update_size(self):
+        pass
 
 
 class Softmax(Layer):
@@ -239,13 +259,14 @@ class Softmax(Layer):
     We don't need these gradients for this lab, and usually care about them in real applications,
     but it is an inconsistency from the rest of the lab.
     """
-    def __init__(self, input_node, true_node):
+    def __init__(self, input_node, true_node, log_param=1e-15):
         """
         TODO: Accept any arguments specific to this child class.
         """
         Layer.__init__(self, torch.Size([1]), [input_node, true_node]) # TODO: Pass along any arguments to the parent's initializer here.
         self.input_node = input_node
         self.true_node = true_node
+        self.log_param = log_param
     def forward(self):
         """
         TODO: Accept any arguments specific to this method.
@@ -257,7 +278,7 @@ class Softmax(Layer):
         v_exp = torch.exp(v.output-max_v)
         v_sum = torch.sum(v_exp, 0, keepdim=True)
         self.classifications = v_exp/v_sum
-        self.output = -1*((y.output*torch.log(self.classifications)).sum())
+        self.output = -1*((y.output*torch.log(self.classifications + self.log_param)).sum())
     def backward(self):
         """
         TODO: Accept any arguments specific to this method.
@@ -273,6 +294,8 @@ class Softmax(Layer):
         v_sum = torch.sum(v_exp, 0, keepdim=True)
         o = v_exp/v_sum
         self.input_node.accumulate_grad(self.grad * (o - self.true_node.output))
+    def update_size(self):
+        pass
 
 
 class Sum(Layer):
@@ -300,4 +323,75 @@ class Sum(Layer):
         """
         self.input_node1.accumulate_grad(self.grad)
         self.input_node2.accumulate_grad(self.grad)
+    def update_size(self):
+        Layer.update_size(self, self.input_node1.size)
 
+class Scale(Layer):
+    def __init__(self, input_node, scaling_factor):
+        Layer.__init__(self, input_node.size, [input_node])
+        self.scaling_factor = scaling_factor
+        self.input_node = input_node
+    def forward(self):
+        self.output = self.input_node.output * self.scaling_factor
+    def backward(self):
+        self.input_node.accumulate_grad(self.grad * self.scaling_factor)
+    def update_size(self):
+        Layer.update_size(self, self.input_node.size)
+
+class SoftmaxWithoutCrossEnt(Layer):
+    def __init__(self, input_node):
+        """
+        TODO: Accept any arguments specific to this child class.
+        """
+        Layer.__init__(self, input_node.size, [input_node]) # TODO: Pass along any arguments to the parent's initializer here.
+        self.input_node = input_node
+    
+    def forward(self):
+        """
+        TODO: Accept any arguments specific to this method.
+        TODO: Set this layer's output based on the outputs of the layers that feed into it.
+        """
+        v = self.input_node
+        max_v = torch.max(v.output, 0, keepdim=True)[0]
+        v_exp = torch.exp(v.output-max_v)
+        v_sum = torch.sum(v_exp, 0, keepdim=True)
+        self.output = v_exp/v_sum
+    def backward(self):
+        """
+        TODO: Accept any arguments specific to this method.
+        TODO: Set this layer's output based on the outputs of the layers that feed into it.
+        TODO: This network's grad attribute should already have been accumulated before calling
+        this method.  This method should compute its own internal and input gradients
+        and accumulate the input gradients into the previous layer.
+        """
+        
+        self.input_node.accumulate_grad((self.output @ torch.eye(self.output.size(1)) - self.output @ self.output.t()) * self.grad)
+    def update_size(self):
+        Layer.update_size(self, self.input_node.size)
+
+
+class Transpose(Layer):
+    def __init__(self, input_node):
+        Layer.__init__(self, (input_node.size[1],input_node.size[0]), [input_node])
+        self.input_node = input_node
+    def forward(self):
+        self.output = self.input_node.output.t()
+    def backward(self):
+        self.input_node.accumulate_grad(self.grad.t())
+    def update_size(self):
+        Layer.update_size(self, self.input_node.size)
+
+class Concat(Layer):
+    def __init__(self, input_node1, input_node2):
+        Layer.__init__(self, (input_node1.size[0] + input_node2.size[0], input_node1.size[1]), [input_node1, input_node2])
+        self.input_node1 = input_node1
+        self.input_node2 = input_node2
+
+    def forward(self):
+        self.output = torch.concat((self.input_node1.output, self.input_node2.output), axis = 0)
+    def backward(self):
+        self.input_node1.accumulate_grad(self.grad[0:self.input_node1.size[0]])
+        self.input_node2.accumulate_grad(self.grad[self.input_node1.size[0]:])
+
+    def update_size(self):
+        pass

@@ -1,9 +1,11 @@
+import torch
 class Network:
     def __init__(self):
         """
         TODO: Initialize a `layers` attribute to hold all the layers in the gradient tape.
         """
         self.layers = []
+        self.batch_size = 1
 
     def add(self, layer):
         """
@@ -33,19 +35,27 @@ class Network:
         #  input to the input layer's output before performing the forward evaluation of the network.
         #
         # Users will be expected to add layers to the network in the order they are evaluated, so
-        # this method can simply call the forward method for each layer in order.
+        # this method can simply call the forward method for each layer in order.            
         for layer in self.layers:
             layer.forward()
         return self.layers[-1].output
         
-
+    def update_batch_size(self, batch_size):
+        if batch_size != self.batch_size:
+            self.batch_size = batch_size 
+            for layer in self.layers:
+                    layer.update_size()
     def backward(self):
         """
         Compute the gradient of the output of all layers through backpropagation backward through the 
         gradient tape.
 
         """
+        for layer in self.layers:
+            layer.clear_grad()
+        self.layers[-1].grad = torch.tensor([1], dtype=torch.get_default_dtype())
         for layer in self.layers[::-1]:
+            #print(layer.grad)
             layer.backward()
 
     def step(self, learning_rate):
