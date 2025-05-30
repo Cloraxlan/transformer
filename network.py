@@ -21,6 +21,10 @@ class Network:
                 raise "Input layers not yet added"
         self.layers.append(layer)
 
+   
+
+
+    
 
     def forward(self):
         """
